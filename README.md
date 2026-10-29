@@ -1,0 +1,67 @@
+# Stackly OneERP — Fiscal Year
+
+Stackly OneERP includes a React/Vite frontend and a Python FastAPI API for FICO management. Fiscal years create twelve accounting periods automatically by default, with an optional manual-period setup; fiscal years begin in `DRAFT` status. Users can register and sign in; module records are saved in the database and scoped to the signed-in account.
+
+## Open the complete app in one browser tab
+
+```bash
+cd frontend
+npm install
+npm run build
+cd ..
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r backend/requirements.txt
+uvicorn backend.main:app --host 127.0.0.1 --port 8000
+```
+
+Open `http://127.0.0.1:8000` to use the React app and Python API from one URL. The browser app sends API requests to the same host. Interactive API docs are at `/docs`; the readiness check is at `/health`.
+
+## Frontend development mode
+
+```bash
+npm run dev
+```
+
+Run this command from the project root. Vite proxies `/api` and `/health` requests to FastAPI at `127.0.0.1:8000`; start the API separately in another terminal with `npm run api` (or the `uvicorn` command above).
+
+The API defaults to a local SQLite database (`stackly_oneerp.db`) and creates its tables on startup. To use MySQL, set `DATABASE_URL` to a SQLAlchemy URL such as `mysql+pymysql://user:password@localhost:3306/stackly_oneerp` and initialize the schema with `database/schema.sql`.
+
+## Sign-in and modules
+
+Open the app and choose **Create an account** on the login page. Passwords are stored as salted PBKDF2 hashes; sign-in uses a seven-day, HTTP-only session cookie. Sign out revokes the stored session. Set `COOKIE_SECURE=true` when serving over HTTPS.
+
+The login page's **Forgot password?** flow sends a one-time reset link that expires after 30 minutes. The Render Blueprint configures Gmail SMTP (`smtp.gmail.com`, port `587`, STARTTLS). To enable delivery, set `SMTP_FROM_EMAIL` and `SMTP_USERNAME` to your Gmail/Google Workspace address and set `SMTP_PASSWORD` to a Google **App Password** under the Render service's **Environment** settings. Do not use your normal Google account password. Google requires 2-Step Verification to create an App Password; generate one in your Google Account security settings. For local development, set `SMTP_PROVIDER=gmail`, `SMTP_USERNAME`, and `SMTP_PASSWORD`; `SMTP_HOST` and `SMTP_PORT` default to Gmail's secure SMTP settings, and the sender defaults to `SMTP_USERNAME`. Custom SMTP providers can instead set `SMTP_PROVIDER=custom`, `SMTP_HOST`, `SMTP_PORT` (587 with STARTTLS or 465 with implicit TLS), `SMTP_FROM_EMAIL`, `SMTP_USERNAME`, and `SMTP_PASSWORD`. Set `APP_BASE_URL` to the public application URL so links open the correct site. Requests are rate-limited per account, reset tokens are stored as hashes, and completing a reset revokes existing sessions. Never commit or share mail credentials.
+
+Company, Fiscal Period, Chart of Accounts, Journal Entry, Accounts Payable, Accounts Receivable, Fixed Assets, Budgeting, GST, and Financial Reports are connected to the selected workspace. Workspace administrators can add an already-registered user as a requester, approver, or administrator and remove members. Users can switch between the workspaces they belong to. Requesters and approvers can create and submit drafts; approvers and administrators can approve or reject them, with rejection reasons and a per-document audit history. Self-approval is enabled. Journal entries, AP/AR invoices, fixed-asset acquisitions, and budgets must be approved before posting or inclusion in approved-budget reports. Rejected documents can be corrected and resubmitted. Only posted transactions affect the live Trial Balance and General Ledger; drafts and pending approvals remain outside the ledger. Fiscal years and periods are scoped to the selected workspace; only administrators can create years and periods, post manual ledger entries, or close periods.
+
+Creating a fiscal year generates twelve periods by default; administrators can instead choose manual setup and create periods individually before activating the year. Period names and open-period date boundaries can be edited while keeping periods contiguous, and date changes are rejected if they would move a posted ledger transaction to a different period. The dashboard counts, pending approvals, posted transactions, and income/expense summaries are loaded from workspace data rather than sample figures. Journal entries must balance, and posting is restricted to an active fiscal year and an open period. Workspace administrators can also post balanced manual entries directly from General Ledger; these are validated against active accounts and the same open-period controls. To share a workspace, first have each person register, then use **Manage access** in the top bar to assign their role.
+
+The current India/INR accounting MVP supports AP/AR invoice posting with configured IGST or CGST+SGST rates, partial or full supplier payments and customer receipts against posted invoices, date-based payables/receivables aging, fixed-asset acquisition and sequential monthly straight-line depreciation with a posted depreciation schedule, approved expense budgets versus posted actuals, date-filtered GST summaries, and generated income-statement and balance-sheet views. General ledger, trial balance, GST, and financial statement reports can be exported to CSV. Workspace admins can save generated financial statements as report records with a server-generated data snapshot and optional notes. Payments and receipts require an active Asset cash/bank account, a unique reference, and an open fiscal period; they create balanced ledger entries and cannot exceed the invoice balance. GST amounts are rounded to paise; configured CGST and SGST component rates are calculated separately. Asset depreciation starts in the month after acquisition and requires month-end posting in sequence. The balance sheet presents current earnings as unclosed equity.
+
+This is a management MVP, not production-grade accounting or tax software. It does not provide bank reconciliation, tax returns/filing, cess, cash-flow statements, multi-currency accounting, automated period-end closing, or partial-month depreciation. Approval roles are workspace-level and do not provide amount-based approval limits, sequential approval chains, or separation-of-duties enforcement; self-approval is intentionally allowed. It does not validate Indian tax law or replace review by a qualified accountant. Verify configurations and reports before relying on them.
+
+## Deploy to Render
+
+The root `render.yaml` defines the combined web service and a persistent PostgreSQL database. The web service uses Render's free plan and may sleep when idle; the database uses Render's paid `basic-256mb` plan and requires billing approval.
+
+1. Push this repository to GitHub and open the [Render Blueprint deployment page](https://render.com/deploy).
+2. Connect `Mallikarjun200/final-version` and select the Blueprint in the repository root.
+3. Review the PostgreSQL plan and any charges, then approve deployment.
+4. Wait for the `stackly-oneerp` service health check to pass. Render will show its shareable `https://stackly-oneerp.onrender.com` URL in the service dashboard.
+5. Create your account from that URL. Do not use the local SQLite database for hosted production data.
+
+## Fiscal-year workflow
+
+1. Create a fiscal year for a company code using either the April–March or January–December calendar.
+2. Keep automatic period generation enabled for twelve monthly periods, or clear the option and create all twelve contiguous periods individually before activation.
+3. Activate the year when approved. A company can have only one active fiscal year; overlapping date ranges and duplicate company/year codes are rejected.
+
+## Validate
+
+```bash
+cd frontend && npm run lint && npm run build
+cd .. && pytest backend/test_main.py
+```
+
+The one-URL setup is for local use. Public deployment requires hosting the built app and API on an internet-accessible server.

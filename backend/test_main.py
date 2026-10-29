@@ -1,0 +1,1364 @@
+from datetime import date, timedelta
+from urllib.parse import parse_qs, urlparse
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+
+from backend import main
+
+
+def make_year(code, start, end, variant="APR_MAR"):
+    return {
+        "company": "STACKLY001",
+        "code": code,
+        "name": f"Financial Year {code}",
+        "variant": variant,
+        "start": start,
+        "end": end,
+    }
+
+
+@pytest.fixture
+def test_client(monkeypatch):
+    test_engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+        future=True,
+    )
+    test_sessions = sessionmaker(bind=test_engine, autoflush=False, autocommit=False, future=True)
+    monkeypatch.setattr(main, "engine", test_engine)
+    monkeypatch.setattr(main, "SessionLocal", test_sessions)
+
+    with TestClient(main.app) as client:
+        response = client.post(
+            "/api/auth/register",
+            json={
+                "email": "tester@example.com",
+                "display_name": "Test User",
+                "password": "correct-horse-battery",
+            },
+        )
+        assert response.status_code == 201
+        yield client
+
+    main.Base.metadata.drop_all(bind=test_engine)
+    test_engine.dispose()
+
+
+def test_create_fiscal_year_generates_twelve_periods(test_client):
+    response = test_client.post(
+        "/api/fiscal-years",
+        json=make_year("FY2027", "2026-04-01", "2027-03-31"),
+    )
+
+    assert response.status_code == 201
+    year = response.json()
+    assert year["period_count"] == 12
+    assert len(year["periods"]) == 12
+    assert year["periods"][0]["start_date"] == "2026-04-01"
+    assert year["periods"][-1]["end_date"] == "2027-03-31"
+    assert year["status"] == "DRAFT"
+
+
+def test_manual_fiscal_periods_can_be_created_before_year_activation(test_client):
+    year = test_client.post(
+        "/api/fiscal-years",
+        json={
+            **make_year("FY2027-MANUAL", "2026-04-01", "2027-03-31"),
+            "generate_periods": False,
+        },
+    )
+    assert year.status_code == 201
+    assert year.json()["periods"] == []
+
+    april = test_client.post(
+        "/api/fiscal-periods",
+        json={
+            "fiscal_year_id": year.json()["id"],
+            "period_number": 1,
+            "name": "April 2026",
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-30",
+        },
+    )
+    assert april.status_code == 201
+    assert april.json()["fiscal_year_code"] == "FY2027-MANUAL"
+    assert test_client.post(
+        f"/api/fiscal-years/{year.json()['id']}/activate"
+    ).status_code == 409
+
+    gap = test_client.post(
+        "/api/fiscal-periods",
+        json={
+            "fiscal_year_id": year.json()["id"],
+            "period_number": 2,
+            "name": "May 2026",
+            "start_date": "2026-05-02",
+            "end_date": "2026-05-31",
+        },
+    )
+    assert gap.status_code == 422
+
+    may = test_client.post(
+        "/api/fiscal-periods",
+        json={
+            "fiscal_year_id": year.json()["id"],
+            "period_number": 2,
+            "name": "May 2026",
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-31",
+        },
+    )
+    assert may.status_code == 201
+    remaining = [
+        ("June 2026", "2026-06-01", "2026-06-30"),
+        ("July 2026", "2026-07-01", "2026-07-31"),
+        ("August 2026", "2026-08-01", "2026-08-31"),
+        ("September 2026", "2026-09-01", "2026-09-30"),
+        ("October 2026", "2026-10-01", "2026-10-31"),
+        ("November 2026", "2026-11-01", "2026-11-30"),
+        ("December 2026", "2026-12-01", "2026-12-31"),
+        ("January 2027", "2027-01-01", "2027-01-31"),
+        ("February 2027", "2027-02-01", "2027-02-28"),
+        ("March 2027", "2027-03-01", "2027-03-31"),
+    ]
+    for period_number, (name, start_date, end_date) in enumerate(remaining, start=3):
+        created = test_client.post(
+            "/api/fiscal-periods",
+            json={
+                "fiscal_year_id": year.json()["id"],
+                "period_number": period_number,
+                "name": name,
+                "start_date": start_date,
+                "end_date": end_date,
+            },
+        )
+        assert created.status_code == 201
+
+    periods = test_client.get("/api/fiscal-periods").json()
+    assert len(periods) == 12
+    assert test_client.post(f"/api/fiscal-years/{year.json()['id']}/activate").status_code == 200
+
+
+def test_fiscal_period_dates_can_be_edited_without_breaking_year_continuity(test_client):
+    year = test_client.post(
+        "/api/fiscal-years",
+        json=make_year("FY2027", "2026-04-01", "2027-03-31"),
+    ).json()
+    periods = test_client.get("/api/fiscal-periods").json()
+    april = next(period for period in periods if period["period_number"] == 1)
+    may = next(period for period in periods if period["period_number"] == 2)
+
+    updated = test_client.patch(
+        f"/api/fiscal-periods/{april['id']}",
+        json={
+            "name": "Extended April",
+            "start_date": "2026-04-01",
+            "end_date": "2026-05-05",
+        },
+    )
+
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "Extended April"
+    assert updated.json()["start_date"] == "2026-04-01"
+    assert updated.json()["end_date"] == "2026-05-05"
+    refreshed = test_client.get("/api/fiscal-periods").json()
+    may = next(period for period in refreshed if period["period_number"] == 2)
+    assert may["start_date"] == "2026-05-06"
+    assert may["end_date"] == "2026-05-31"
+    assert len(refreshed) == year["period_count"] == 12
+    assert refreshed[0]["start_date"] == year["start"]
+    assert refreshed[-1]["end_date"] == year["end"]
+    assert all(
+        (date.fromisoformat(left["end_date"]) + timedelta(days=1)) == date.fromisoformat(right["start_date"])
+        for left, right in zip(refreshed, refreshed[1:])
+    )
+
+
+def test_fiscal_period_date_edits_validate_bounds_and_posted_ledger_dates(test_client):
+    activate_test_year(test_client)
+    periods = test_client.get("/api/fiscal-periods").json()
+    april = next(period for period in periods if period["period_number"] == 1)
+
+    create_account(test_client, "5000", "Office expense", "Expense")
+    create_account(test_client, "1000", "Bank", "Asset")
+    journal = test_client.post(
+        "/api/modules/journal-entry/records",
+        json={
+            "name": "May posting",
+            "data": {
+                "document_no": "JE-MAY-PERIOD-EDIT",
+                "posting_date": "2026-05-02",
+                "lines": [
+                    {"account_code": "5000", "debit": 10, "credit": 0},
+                    {"account_code": "1000", "debit": 0, "credit": 10},
+                ],
+            },
+        },
+    ).json()
+    approve_document(test_client, "journal-entry", journal["id"])
+    assert test_client.post(
+        f"/api/modules/journal-entry/records/{journal['id']}/post"
+    ).status_code == 200
+
+    moved_posting_date = test_client.patch(
+        f"/api/fiscal-periods/{april['id']}",
+        json={
+            "name": april["name"],
+            "start_date": "2026-04-01",
+            "end_date": "2026-05-05",
+        },
+    )
+    assert moved_posting_date.status_code == 409
+    assert "posted ledger entries" in moved_posting_date.json()["detail"]
+
+    outside_fiscal_year = test_client.patch(
+        f"/api/fiscal-periods/{april['id']}",
+        json={
+            "name": april["name"],
+            "start_date": "2026-03-31",
+            "end_date": "2026-04-30",
+        },
+    )
+    assert outside_fiscal_year.status_code == 422
+
+
+def test_fiscal_year_api_requires_authentication(test_client):
+    test_client.post("/api/auth/logout")
+
+    assert test_client.get("/api/fiscal-years").status_code == 401
+
+
+def test_registration_and_login_use_http_only_session_cookie(test_client):
+    test_client.post("/api/auth/logout")
+    response = test_client.post(
+        "/api/auth/login",
+        json={"email": "tester@example.com", "password": "correct-horse-battery"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["user"]["email"] == "tester@example.com"
+    assert "httponly" in response.headers["set-cookie"].lower()
+    assert test_client.get("/api/auth/me").json()["display_name"] == "Test User"
+
+
+def test_forgot_password_sends_single_use_reset_link_and_revokes_sessions(test_client, monkeypatch):
+    monkeypatch.setenv("SMTP_PROVIDER", "custom")
+    monkeypatch.setenv("SMTP_HOST", "smtp.example.com")
+    monkeypatch.setenv("SMTP_PORT", "587")
+    monkeypatch.setenv("SMTP_FROM_EMAIL", "accounts@example.com")
+    monkeypatch.delenv("SMTP_USERNAME", raising=False)
+    monkeypatch.delenv("SMTP_PASSWORD", raising=False)
+    monkeypatch.setenv("APP_BASE_URL", "https://stackly.example.com")
+    existing_session = test_client.cookies.get("stackly_session")
+    sent_emails = []
+    monkeypatch.setattr(
+        main,
+        "send_password_reset_email",
+        lambda recipient, reset_url, mail_config: sent_emails.append((recipient, reset_url)),
+    )
+
+    requested = test_client.post(
+        "/api/auth/forgot-password",
+        json={"email": " TESTER@example.com "},
+    )
+    assert requested.status_code == 200
+    assert requested.json()["message"] == "If an account exists for that email, reset instructions will be sent."
+    assert len(sent_emails) == 1
+    recipient, reset_url = sent_emails[0]
+    assert recipient == "tester@example.com"
+    assert urlparse(reset_url).scheme == "https"
+    token = parse_qs(urlparse(reset_url).query)["reset_token"][0]
+
+    throttled = test_client.post(
+        "/api/auth/forgot-password",
+        json={"email": "tester@example.com"},
+    )
+    assert throttled.status_code == 200
+    assert len(sent_emails) == 1
+
+    reset = test_client.post(
+        "/api/auth/reset-password",
+        json={"token": token, "password": "a-new-secure-password"},
+    )
+    assert reset.status_code == 200
+    test_client.cookies.set("stackly_session", existing_session)
+    assert test_client.get("/api/auth/me").status_code == 401
+
+    replay = test_client.post(
+        "/api/auth/reset-password",
+        json={"token": token, "password": "another-new-password"},
+    )
+    assert replay.status_code == 400
+    login = test_client.post(
+        "/api/auth/login",
+        json={"email": "tester@example.com", "password": "a-new-secure-password"},
+    )
+    assert login.status_code == 200
+
+
+def test_forgot_password_requires_email_configuration_for_all_addresses(test_client, monkeypatch):
+    monkeypatch.setenv("SMTP_PROVIDER", "custom")
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+    monkeypatch.delenv("SMTP_FROM_EMAIL", raising=False)
+    monkeypatch.delenv("SMTP_USERNAME", raising=False)
+    monkeypatch.delenv("SMTP_PASSWORD", raising=False)
+
+    known_account = test_client.post(
+        "/api/auth/forgot-password",
+        json={"email": "tester@example.com"},
+    )
+    unknown_account = test_client.post(
+        "/api/auth/forgot-password",
+        json={"email": "unknown@example.com"},
+    )
+
+    assert known_account.status_code == unknown_account.status_code == 503
+    assert known_account.json() == unknown_account.json()
+
+
+def test_gmail_mail_configuration_uses_secure_defaults_and_account_sender(monkeypatch):
+    monkeypatch.setenv("SMTP_PROVIDER", "gmail")
+    monkeypatch.delenv("SMTP_HOST", raising=False)
+    monkeypatch.delenv("SMTP_PORT", raising=False)
+    monkeypatch.delenv("SMTP_FROM_EMAIL", raising=False)
+    monkeypatch.setenv("SMTP_USERNAME", "finance@example.com")
+    monkeypatch.setenv("SMTP_PASSWORD", "google-app-password")
+
+    config = main.password_reset_mail_config()
+
+    assert config["host"] == "smtp.gmail.com"
+    assert config["port"] == 587
+    assert config["username"] == "finance@example.com"
+    assert config["sender"] == "finance@example.com"
+
+
+def test_gmail_mail_configuration_requires_an_app_password(monkeypatch):
+    monkeypatch.setenv("SMTP_PROVIDER", "gmail")
+    monkeypatch.setenv("SMTP_USERNAME", "finance@example.com")
+    monkeypatch.delenv("SMTP_PASSWORD", raising=False)
+
+    with pytest.raises(main.HTTPException) as error:
+        main.password_reset_mail_config()
+
+    assert error.value.status_code == 503
+    assert "Google app password" in error.value.detail
+
+
+def test_registration_rejects_duplicate_email(test_client):
+    response = test_client.post(
+        "/api/auth/register",
+        json={
+            "email": "TESTER@example.com",
+            "display_name": "Another User",
+            "password": "correct-horse-battery",
+        },
+    )
+
+    assert response.status_code == 409
+
+
+def test_module_records_are_persistent_and_private_to_the_account(test_client):
+    created = test_client.post(
+        "/api/modules/company/records",
+        json={
+            "name": "Northwind",
+            "status": "Active",
+            "data": {"company_code": "NORTH", "currency": "INR"},
+        },
+    )
+    assert created.status_code == 201
+    record = created.json()
+    assert record["data"]["company_code"] == "NORTH"
+    assert test_client.get("/api/modules/company/records").json()[0]["id"] == record["id"]
+
+    with TestClient(main.app) as other_user:
+        registration = other_user.post(
+            "/api/auth/register",
+            json={
+                "email": "other@example.com",
+                "display_name": "Other User",
+                "password": "another-secure-password",
+            },
+        )
+        assert registration.status_code == 201
+        assert other_user.get("/api/modules/company/records").json() == []
+
+
+def test_workspace_roles_share_records_and_gate_approval_actions(test_client):
+    record = test_client.post(
+        "/api/modules/journal-entry/records",
+        json={"name": "Reviewable journal", "data": {"document_no": "JE-ROLE"}},
+    ).json()
+    workspace_id = test_client.get("/api/workspaces").json()[0]["id"]
+
+    with TestClient(main.app) as approver:
+        registration = approver.post(
+            "/api/auth/register",
+            json={
+                "email": "approver@example.com",
+                "display_name": "Approver User",
+                "password": "another-secure-password",
+            },
+        )
+        assert registration.status_code == 201
+        added = test_client.put(
+            "/api/workspaces/members",
+            json={"email": "approver@example.com", "role": "approver"},
+        )
+        assert added.status_code == 200
+        approver.headers.update({"X-Workspace-ID": str(workspace_id)})
+        assert approver.get("/api/modules/journal-entry/records").json()[0]["id"] == record["id"]
+
+        submitted = test_client.post(
+            f"/api/modules/journal-entry/records/{record['id']}/submit"
+        )
+        assert submitted.status_code == 200
+        assert submitted.json()["status"] == "Pending Approval"
+        assert approver.get("/api/approvals/pending").json()[0]["id"] == record["id"]
+        approved = approver.post(
+            f"/api/modules/journal-entry/records/{record['id']}/review",
+            json={"action": "approve"},
+        )
+        assert approved.status_code == 200
+        assert approved.json()["status"] == "Approved"
+        history = approver.get(
+            f"/api/modules/journal-entry/records/{record['id']}/approvals"
+        ).json()
+        assert [event["action"] for event in history] == ["submitted", "approve"]
+        assert history[-1]["actor_email"] == "approver@example.com"
+
+        own_record = approver.post(
+            "/api/modules/journal-entry/records",
+            json={"name": "Approver self-review", "data": {"document_no": "JE-SELF"}},
+        ).json()
+        self_submission = approver.post(
+            f"/api/modules/journal-entry/records/{own_record['id']}/submit"
+        )
+        assert self_submission.status_code == 200
+        self_approval = approver.post(
+            f"/api/modules/journal-entry/records/{own_record['id']}/review",
+            json={"action": "approve"},
+        )
+        assert self_approval.status_code == 200
+        assert self_approval.json()["status"] == "Approved"
+
+        assert test_client.delete(
+            f"/api/workspaces/members/{added.json()['user_id']}"
+        ).status_code == 204
+        assert approver.get("/api/modules/journal-entry/records").status_code == 403
+
+
+def test_fiscal_years_and_periods_are_scoped_to_workspace(test_client):
+    created = test_client.post(
+        "/api/fiscal-years",
+        json=make_year("FY2027", "2026-04-01", "2027-03-31"),
+    )
+    assert created.status_code == 201
+
+    with TestClient(main.app) as other_workspace:
+        registration = other_workspace.post(
+            "/api/auth/register",
+            json={
+                "email": "finance-owner@example.com",
+                "display_name": "Finance Owner",
+                "password": "another-secure-password",
+            },
+        )
+        assert registration.status_code == 201
+        assert other_workspace.get("/api/fiscal-years").json() == []
+        assert other_workspace.get("/api/fiscal-periods").json() == []
+        duplicate_code = other_workspace.post(
+            "/api/fiscal-years",
+            json=make_year("FY2027", "2026-04-01", "2027-03-31"),
+        )
+        assert duplicate_code.status_code == 201
+
+
+def test_approval_rejection_requires_reason_and_can_be_resubmitted(test_client):
+    record = test_client.post(
+        "/api/modules/budgeting/records",
+        json={"name": "FY27 budget", "data": {"amount": 500}},
+    ).json()
+    submit = test_client.post(f"/api/modules/budgeting/records/{record['id']}/submit")
+    assert submit.status_code == 200
+
+    missing_reason = test_client.post(
+        f"/api/modules/budgeting/records/{record['id']}/review",
+        json={"action": "reject"},
+    )
+    assert missing_reason.status_code == 422
+    rejected = test_client.post(
+        f"/api/modules/budgeting/records/{record['id']}/review",
+        json={"action": "reject", "comment": "Please correct the forecast."},
+    )
+    assert rejected.status_code == 200
+    assert rejected.json()["status"] == "Rejected"
+
+    updated = test_client.patch(
+        f"/api/modules/budgeting/records/{record['id']}",
+        json={"data": {"amount": 600}},
+    )
+    assert updated.status_code == 200
+    resubmitted = test_client.post(f"/api/modules/budgeting/records/{record['id']}/submit")
+    assert resubmitted.status_code == 200
+    approved = test_client.post(
+        f"/api/modules/budgeting/records/{record['id']}/review",
+        json={"action": "approve"},
+    )
+    assert approved.status_code == 200
+    assert approved.json()["status"] == "Approved"
+    assert [event["action"] for event in test_client.get(
+        f"/api/modules/budgeting/records/{record['id']}/approvals"
+    ).json()] == ["submitted", "reject", "submitted", "approve"]
+
+
+def test_module_record_update_and_delete(test_client):
+    created = test_client.post(
+        "/api/modules/ap/records",
+        json={"name": "Invoice 1001", "data": {"amount": 500}},
+    )
+    record_id = created.json()["id"]
+
+    invalid_status_change = test_client.patch(
+        f"/api/modules/ap/records/{record_id}",
+        json={"status": "Approved"},
+    )
+    assert invalid_status_change.status_code == 422
+    updated = test_client.patch(
+        f"/api/modules/ap/records/{record_id}",
+        json={"data": {"amount": 750}},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["status"] == "Draft"
+    assert updated.json()["data"]["amount"] == 750
+
+    deleted = test_client.delete(f"/api/modules/ap/records/{record_id}")
+    assert deleted.status_code == 204
+    assert test_client.get("/api/modules/ap/records").json() == []
+
+
+def test_module_record_rejects_null_updates(test_client):
+    record_id = test_client.post(
+        "/api/modules/company/records",
+        json={"name": "Northwind"},
+    ).json()["id"]
+
+    response = test_client.patch(
+        f"/api/modules/company/records/{record_id}",
+        json={"name": None},
+    )
+
+    assert response.status_code == 422
+
+
+def test_chart_of_accounts_rejects_duplicate_codes_and_locks_used_accounts(test_client):
+    first = create_account(test_client, "1000", "Bank", "Asset")
+    duplicate = test_client.post(
+        "/api/modules/chart-of-accounts/records",
+        json={
+            "name": "Duplicate bank",
+            "status": "Active",
+            "data": {"account_code": "1000", "account_type": "Asset"},
+        },
+    )
+    assert duplicate.status_code == 409
+
+    activate_test_year(test_client)
+    create_account(test_client, "3000", "Owner equity", "Equity")
+    journal = test_client.post(
+        "/api/modules/journal-entry/records",
+        json={
+            "name": "Opening balance",
+            "data": {
+                "document_no": "JE-COA-LOCK",
+                "posting_date": "2026-04-01",
+                "lines": [
+                    {"account_code": "1000", "debit": 100, "credit": 0},
+                    {"account_code": "3000", "debit": 0, "credit": 100},
+                ],
+            },
+        },
+    ).json()
+    approve_document(test_client, "journal-entry", journal["id"])
+    assert test_client.post(f"/api/modules/journal-entry/records/{journal['id']}/post").status_code == 200
+    assert test_client.patch(
+        f"/api/modules/chart-of-accounts/records/{first['id']}",
+        json={"data": {"account_code": "1001", "account_type": "Asset"}},
+    ).status_code == 409
+    assert test_client.delete(f"/api/modules/chart-of-accounts/records/{first['id']}").status_code == 409
+
+
+def test_unknown_module_is_rejected(test_client):
+    response = test_client.get("/api/modules/not-a-module/records")
+
+    assert response.status_code == 404
+
+
+def create_account(client, code, name, account_type):
+    response = client.post(
+        "/api/modules/chart-of-accounts/records",
+        json={
+            "name": name,
+            "status": "Active",
+            "data": {"account_code": code, "account_type": account_type},
+        },
+    )
+    assert response.status_code == 201
+    return response.json()
+
+
+def activate_test_year(client):
+    year = client.post(
+        "/api/fiscal-years",
+        json=make_year("FY2027", "2026-04-01", "2027-03-31"),
+    )
+    assert year.status_code == 201
+    activated = client.post(f"/api/fiscal-years/{year.json()['id']}/activate")
+    assert activated.status_code == 200
+    return activated.json()
+
+
+def approve_document(client, module_id, record_id, reviewer=None):
+    submitted = client.post(f"/api/modules/{module_id}/records/{record_id}/submit")
+    assert submitted.status_code == 200
+    approved = (reviewer or client).post(
+        f"/api/modules/{module_id}/records/{record_id}/review",
+        json={"action": "approve"},
+    )
+    assert approved.status_code == 200
+    return approved.json()
+
+
+def test_draft_journal_does_not_affect_trial_balance_until_posted(test_client):
+    activate_test_year(test_client)
+    create_account(test_client, "5000", "Office expense", "Expense")
+    create_account(test_client, "1000", "Bank", "Asset")
+    created = test_client.post(
+        "/api/modules/journal-entry/records",
+        json={
+            "name": "Rent payment",
+            "data": {
+                "document_no": "JE-001",
+                "posting_date": "2026-04-10",
+                "lines": [
+                    {"account_code": "5000", "debit": 125.5, "credit": 0},
+                    {"account_code": "1000", "debit": 0, "credit": 125.5},
+                ],
+            },
+        },
+    ).json()
+
+    report = test_client.get(
+        "/api/accounting/trial-balance?start_date=2026-04-01&end_date=2026-04-30"
+    ).json()
+    assert all(
+        row["period_debit_minor"] == row["period_credit_minor"] == 0
+        for row in report["accounts"]
+    )
+
+    approve_document(test_client, "journal-entry", created["id"])
+    posted = test_client.post(f"/api/modules/journal-entry/records/{created['id']}/post")
+    assert posted.status_code == 200
+    assert posted.json()["status"] == "Posted"
+    report = test_client.get(
+        "/api/accounting/trial-balance?start_date=2026-04-01&end_date=2026-04-30"
+    ).json()
+    assert report["balanced"] is True
+    assert report["total_debit_minor"] == 12550
+    assert report["total_credit_minor"] == 12550
+    assert {row["account_code"]: row["period_debit_minor"] for row in report["accounts"]} == {
+        "1000": 0,
+        "5000": 12550,
+    }
+    assert test_client.post(f"/api/modules/journal-entry/records/{created['id']}/post").status_code == 409
+    assert test_client.patch(
+        f"/api/modules/journal-entry/records/{created['id']}",
+        json={"name": "Changed after posting"},
+    ).status_code == 409
+
+
+def test_manual_general_ledger_entry_posts_balanced_lines(test_client):
+    activate_test_year(test_client)
+    create_account(test_client, "5000", "Office expense", "Expense")
+    create_account(test_client, "1000", "Bank", "Asset")
+
+    invalid = test_client.post(
+        "/api/accounting/general-ledger/records",
+        json={
+            "document_no": "GL-UNBALANCED",
+            "posting_date": "2026-04-10",
+            "lines": [
+                {"account_code": "5000", "debit": 125.5},
+                {"account_code": "1000", "credit": 100},
+            ],
+        },
+    )
+    assert invalid.status_code == 422
+
+    posted = test_client.post(
+        "/api/accounting/general-ledger/records",
+        json={
+            "document_no": "GL-MANUAL-001",
+            "posting_date": "2026-04-10",
+            "lines": [
+                {"account_code": "5000", "debit": 125.5, "description": "Office rent"},
+                {"account_code": "1000", "credit": 125.5, "description": "Bank transfer"},
+            ],
+        },
+    )
+    assert posted.status_code == 201
+    assert posted.json()["status"] == "Posted"
+    assert posted.json()["data"]["total_debit_minor"] == 12550
+    records = test_client.get("/api/modules/general-ledger/records").json()
+    assert len(records) == 1
+    assert records[0]["id"] == posted.json()["id"]
+    entries = test_client.get(
+        "/api/accounting/general-ledger?start_date=2026-04-01&end_date=2026-04-30"
+    ).json()
+    assert [entry["source_module"] for entry in entries] == ["general-ledger", "general-ledger"]
+    assert sum(entry["debit_minor"] for entry in entries) == 12550
+    assert sum(entry["credit_minor"] for entry in entries) == 12550
+    balance = test_client.get(
+        "/api/accounting/trial-balance?start_date=2026-04-01&end_date=2026-04-30"
+    ).json()
+    assert balance["balanced"] is True
+    assert balance["total_debit_minor"] == 12550
+    assert balance["total_credit_minor"] == 12550
+
+
+def test_unbalanced_journal_is_rejected_without_creating_ledger_entries(test_client):
+    activate_test_year(test_client)
+    create_account(test_client, "5000", "Office expense", "Expense")
+    create_account(test_client, "1000", "Bank", "Asset")
+    created = test_client.post(
+        "/api/modules/journal-entry/records",
+        json={
+            "name": "Unbalanced entry",
+            "data": {
+                "document_no": "JE-002",
+                "posting_date": "2026-04-10",
+                "lines": [
+                    {"account_code": "5000", "debit": 100, "credit": 0},
+                    {"account_code": "1000", "debit": 0, "credit": 90},
+                ],
+            },
+        },
+    ).json()
+
+    approve_document(test_client, "journal-entry", created["id"])
+    response = test_client.post(f"/api/modules/journal-entry/records/{created['id']}/post")
+
+    assert response.status_code == 422
+    assert test_client.get(
+        "/api/accounting/general-ledger?start_date=2026-04-01&end_date=2026-04-30"
+    ).json() == []
+
+
+def test_ap_and_ar_posts_generate_balanced_control_account_lines(test_client):
+    activate_test_year(test_client)
+    create_account(test_client, "5000", "Office expense", "Expense")
+    create_account(test_client, "2100", "Accounts payable", "Liability")
+    create_account(test_client, "4000", "Sales", "Income")
+    create_account(test_client, "1100", "Accounts receivable", "Asset")
+    ap = test_client.post(
+        "/api/modules/ap/records",
+        json={
+            "name": "Supplier bill",
+            "data": {
+                "invoice_no": "AP-1",
+                "invoice_date": "2026-04-11",
+                "amount": 1000,
+                "account_code": "5000",
+                "control_account_code": "2100",
+            },
+        },
+    ).json()
+    ar = test_client.post(
+        "/api/modules/ar/records",
+        json={
+            "name": "Customer invoice",
+            "data": {
+                "invoice_no": "AR-1",
+                "invoice_date": "2026-04-12",
+                "amount": 1500,
+                "account_code": "4000",
+                "control_account_code": "1100",
+            },
+        },
+    ).json()
+
+    approve_document(test_client, "ap", ap["id"])
+    approve_document(test_client, "ar", ar["id"])
+    assert test_client.post(f"/api/modules/ap/records/{ap['id']}/post").status_code == 200
+    assert test_client.post(f"/api/modules/ar/records/{ar['id']}/post").status_code == 200
+    report = test_client.get(
+        "/api/accounting/trial-balance?start_date=2026-04-01&end_date=2026-04-30"
+    ).json()
+    assert report["balanced"] is True
+    assert report["total_debit_minor"] == 250000
+    assert report["total_credit_minor"] == 250000
+
+
+def test_gst_invoice_posting_and_summary_use_configured_tax_lines(test_client):
+    activate_test_year(test_client)
+    create_account(test_client, "5000", "Office expense", "Expense")
+    create_account(test_client, "2100", "Accounts payable", "Liability")
+    create_account(test_client, "1400", "Input IGST", "Asset")
+    create_account(test_client, "4000", "Sales", "Income")
+    create_account(test_client, "1100", "Accounts receivable", "Asset")
+    create_account(test_client, "2200", "Output CGST", "Liability")
+    create_account(test_client, "2300", "Output SGST", "Liability")
+    tax_config = test_client.post(
+        "/api/modules/gst/records",
+        json={
+            "name": "IGST standard",
+            "status": "Active",
+            "data": {"tax_type": "IGST", "rate": 18, "effective_date": "2026-04-01"},
+        },
+    )
+    assert tax_config.status_code == 201
+    ap = test_client.post(
+        "/api/modules/ap/records",
+        json={
+            "name": "Taxable supplier invoice",
+            "data": {
+                "invoice_no": "AP-GST-1",
+                "invoice_date": "2026-04-11",
+                "amount": 1000,
+                "account_code": "5000",
+                "control_account_code": "2100",
+                "tax_mode": "IGST",
+                "tax_rate": 18,
+                "tax_account_code": "1400",
+            },
+        },
+    ).json()
+    ar = test_client.post(
+        "/api/modules/ar/records",
+        json={
+            "name": "Taxable customer invoice",
+            "data": {
+                "invoice_no": "AR-GST-1",
+                "invoice_date": "2026-04-12",
+                "amount": 1000,
+                "account_code": "4000",
+                "control_account_code": "1100",
+                "tax_mode": "CGST+SGST",
+                "tax_rate": 18,
+                "cgst_rate": 10,
+                "sgst_rate": 8,
+                "cgst_account_code": "2200",
+                "sgst_account_code": "2300",
+            },
+        },
+    ).json()
+
+    approve_document(test_client, "ap", ap["id"])
+    approve_document(test_client, "ar", ar["id"])
+    assert test_client.post(f"/api/modules/ap/records/{ap['id']}/post").status_code == 200
+    assert test_client.post(f"/api/modules/ar/records/{ar['id']}/post").status_code == 200
+    ledger = test_client.get("/api/accounting/general-ledger").json()
+    assert sum(entry["debit_minor"] for entry in ledger) == 236000
+    assert sum(entry["credit_minor"] for entry in ledger) == 236000
+    tax_credits = {
+        entry["account_code"]: entry["credit_minor"]
+        for entry in ledger
+        if entry["account_code"] in {"2200", "2300"}
+    }
+    assert tax_credits == {"2200": 10000, "2300": 8000}
+    summary = test_client.get("/api/accounting/gst-summary").json()
+    assert {(row["direction"], row["tax_minor"]) for row in summary} == {
+        ("input", 18000),
+        ("output", 18000),
+    }
+    assert all(row["taxable_minor"] == 100000 for row in summary)
+    input_summary = test_client.get(
+        "/api/accounting/gst-summary?start_date=2026-04-11&end_date=2026-04-11"
+    )
+    assert input_summary.status_code == 200
+    assert [(row["direction"], row["tax_minor"]) for row in input_summary.json()] == [("input", 18000)]
+    output_summary = test_client.get(
+        "/api/accounting/gst-summary?start_date=2026-04-12&end_date=2026-04-12"
+    )
+    assert output_summary.status_code == 200
+    assert [(row["direction"], row["tax_minor"]) for row in output_summary.json()] == [("output", 18000)]
+    assert test_client.get(
+        "/api/accounting/gst-summary?start_date=2026-04-13&end_date=2026-04-12"
+    ).status_code == 422
+
+
+def test_ap_payment_and_ar_receipt_post_partial_balanced_ledger_entries(test_client):
+    activate_test_year(test_client)
+    create_account(test_client, "5000", "Office expense", "Expense")
+    create_account(test_client, "2100", "Accounts payable", "Liability")
+    create_account(test_client, "4000", "Sales", "Income")
+    create_account(test_client, "1100", "Accounts receivable", "Asset")
+    create_account(test_client, "1000", "Bank", "Asset")
+    ap = test_client.post(
+        "/api/modules/ap/records",
+        json={
+            "name": "Supplier invoice to settle",
+            "data": {
+                "invoice_no": "AP-SETTLE-1",
+                "invoice_date": "2026-04-10",
+                "amount": 100,
+                "account_code": "5000",
+                "control_account_code": "2100",
+            },
+        },
+    ).json()
+    ar = test_client.post(
+        "/api/modules/ar/records",
+        json={
+            "name": "Customer invoice to collect",
+            "data": {
+                "invoice_no": "AR-SETTLE-1",
+                "invoice_date": "2026-04-10",
+                "amount": 200,
+                "account_code": "4000",
+                "control_account_code": "1100",
+            },
+        },
+    ).json()
+    approve_document(test_client, "ap", ap["id"])
+    approve_document(test_client, "ar", ar["id"])
+    assert test_client.post(f"/api/modules/ap/records/{ap['id']}/post").status_code == 200
+    assert test_client.post(f"/api/modules/ar/records/{ar['id']}/post").status_code == 200
+
+    first_payment = test_client.post(
+        f"/api/modules/ap/records/{ap['id']}/payments",
+        json={
+            "payment_reference": "BANK-OUT-1",
+            "posting_date": "2026-04-15",
+            "amount": 40,
+            "cash_account_code": "1000",
+        },
+    )
+    assert first_payment.status_code == 201
+    assert first_payment.json()["settlement_status"] == "Partially Paid"
+    assert first_payment.json()["paid_minor"] == 4000
+    assert first_payment.json()["outstanding_minor"] == 6000
+
+    second_payment = test_client.post(
+        f"/api/modules/ap/records/{ap['id']}/payments",
+        json={
+            "payment_reference": "BANK-OUT-2",
+            "posting_date": "2026-04-16",
+            "amount": 60,
+            "cash_account_code": "1000",
+        },
+    )
+    assert second_payment.status_code == 201
+    assert second_payment.json()["settlement_status"] == "Paid"
+    assert second_payment.json()["outstanding_minor"] == 0
+    assert test_client.post(
+        f"/api/modules/ap/records/{ap['id']}/payments",
+        json={
+            "payment_reference": "BANK-OUT-OVER",
+            "posting_date": "2026-04-16",
+            "amount": 1,
+            "cash_account_code": "1000",
+        },
+    ).status_code == 422
+    assert test_client.post(
+        f"/api/modules/ap/records/{ap['id']}/payments",
+        json={
+            "payment_reference": "BANK-OUT-1",
+            "posting_date": "2026-04-16",
+            "amount": 1,
+            "cash_account_code": "1000",
+        },
+    ).status_code == 409
+
+    receipt = test_client.post(
+        f"/api/modules/ar/records/{ar['id']}/payments",
+        json={
+            "payment_reference": "BANK-IN-1",
+            "posting_date": "2026-04-17",
+            "amount": 75,
+            "cash_account_code": "1000",
+        },
+    )
+    assert receipt.status_code == 201
+    assert receipt.json()["settlement_status"] == "Partially Paid"
+    assert receipt.json()["outstanding_minor"] == 12500
+    assert test_client.post(
+        f"/api/modules/ar/records/{ar['id']}/payments",
+        json={
+            "payment_reference": "BANK-IN-SAME-ACCOUNT",
+            "posting_date": "2026-04-17",
+            "amount": 1,
+            "cash_account_code": "1100",
+        },
+    ).status_code == 422
+
+    with TestClient(main.app) as other_user:
+        registration = other_user.post(
+            "/api/auth/register",
+            json={
+                "email": "settlement-other@example.com",
+                "display_name": "Other User",
+                "password": "another-secure-password",
+            },
+        )
+        assert registration.status_code == 201
+        assert other_user.get("/api/modules/ap/settlements").json() == []
+        assert other_user.post(
+            f"/api/modules/ap/records/{ap['id']}/payments",
+            json={
+                "payment_reference": "OTHER-USER-PAYMENT",
+                "posting_date": "2026-04-18",
+                "amount": 1,
+                "cash_account_code": "1000",
+            },
+        ).status_code == 404
+
+    ledger = test_client.get("/api/accounting/general-ledger").json()
+    ap_payment = [entry for entry in ledger if entry["source_module"] == "ap-payment"]
+    ar_receipt = [entry for entry in ledger if entry["source_module"] == "ar-receipt"]
+    assert sum(entry["debit_minor"] for entry in ap_payment) == 10000
+    assert sum(entry["credit_minor"] for entry in ap_payment) == 10000
+    assert sum(entry["debit_minor"] for entry in ar_receipt) == 7500
+    assert sum(entry["credit_minor"] for entry in ar_receipt) == 7500
+    tb = test_client.get(
+        "/api/accounting/trial-balance?start_date=2026-04-01&end_date=2026-04-30"
+    ).json()
+    assert tb["balanced"] is True
+    assert tb["total_debit_minor"] == 22500
+    assert tb["total_credit_minor"] == 22500
+
+
+def test_invoice_payment_requires_posted_invoice_active_cash_account_and_open_period(test_client):
+    activate_test_year(test_client)
+    create_account(test_client, "5000", "Office expense", "Expense")
+    create_account(test_client, "2100", "Accounts payable", "Liability")
+    create_account(test_client, "1000", "Bank", "Asset")
+    invoice = test_client.post(
+        "/api/modules/ap/records",
+        json={
+            "name": "Unposted supplier invoice",
+            "data": {
+                "invoice_no": "AP-UNPOSTED",
+                "invoice_date": "2026-04-10",
+                "amount": 20,
+                "account_code": "5000",
+                "control_account_code": "2100",
+            },
+        },
+    ).json()
+    payment_payload = {
+        "payment_reference": "BANK-UNPOSTED",
+        "posting_date": "2026-04-15",
+        "amount": 20,
+        "cash_account_code": "1000",
+    }
+    assert test_client.post(
+        f"/api/modules/ap/records/{invoice['id']}/payments",
+        json=payment_payload,
+    ).status_code == 409
+
+    approve_document(test_client, "ap", invoice["id"])
+    assert test_client.post(f"/api/modules/ap/records/{invoice['id']}/post").status_code == 200
+    assert test_client.post(f"/api/modules/ap/records/{invoice['id']}/payments", json={
+        **payment_payload,
+        "payment_reference": "BANK-WRONG-ACCOUNT",
+        "cash_account_code": "5000",
+    }).status_code == 422
+    periods = test_client.get("/api/fiscal-periods").json()
+    april = next(period for period in periods if period["start_date"] == "2026-04-01")
+    assert test_client.post(f"/api/fiscal-periods/{april['id']}/close").status_code == 200
+    assert test_client.post(f"/api/modules/ap/records/{invoice['id']}/payments", json={
+        **payment_payload,
+        "payment_reference": "BANK-CLOSED-PERIOD",
+    }).status_code == 409
+
+
+def test_budget_variance_and_financial_statements_use_posted_entries(test_client):
+    activate_test_year(test_client)
+    create_account(test_client, "5000", "Office expense", "Expense")
+    create_account(test_client, "1000", "Bank", "Asset")
+    create_account(test_client, "3000", "Owner equity", "Equity")
+    budget = test_client.post(
+        "/api/modules/budgeting/records",
+        json={
+            "name": "Office expense budget",
+            "data": {
+                "account_code": "5000",
+                "start_date": "2026-04-01",
+                "end_date": "2027-03-31",
+                "amount": 200,
+            },
+        },
+    )
+    assert budget.status_code == 201
+    approve_document(test_client, "budgeting", budget.json()["id"])
+    opening = test_client.post(
+        "/api/modules/journal-entry/records",
+        json={
+            "name": "Opening capital",
+            "data": {
+                "document_no": "JE-OPENING",
+                "posting_date": "2026-04-01",
+                "lines": [
+                    {"account_code": "1000", "debit": 200, "credit": 0},
+                    {"account_code": "3000", "debit": 0, "credit": 200},
+                ],
+            },
+        },
+    ).json()
+    approve_document(test_client, "journal-entry", opening["id"])
+    assert test_client.post(f"/api/modules/journal-entry/records/{opening['id']}/post").status_code == 200
+    journal = test_client.post(
+        "/api/modules/journal-entry/records",
+        json={
+            "name": "April expense",
+            "data": {
+                "document_no": "JE-BUDGET",
+                "posting_date": "2026-04-10",
+                "lines": [
+                    {"account_code": "5000", "debit": 125.5, "credit": 0},
+                    {"account_code": "1000", "debit": 0, "credit": 125.5},
+                ],
+            },
+        },
+    ).json()
+    approve_document(test_client, "journal-entry", journal["id"])
+    assert test_client.post(f"/api/modules/journal-entry/records/{journal['id']}/post").status_code == 200
+
+    variance = test_client.get("/api/accounting/budget-variance").json()
+    assert variance[0]["budget_minor"] == 20000
+    assert variance[0]["actual_minor"] == 12550
+    assert variance[0]["variance_minor"] == 7450
+    income = test_client.get(
+        "/api/accounting/financial-report?report_type=income_statement&start_date=2026-04-01&end_date=2026-04-30"
+    ).json()
+    assert income["total_expenses_minor"] == 12550
+    assert income["net_income_minor"] == -12550
+    balance_sheet = test_client.get(
+        "/api/accounting/financial-report?report_type=balance_sheet&end_date=2026-04-30"
+    ).json()
+    assert balance_sheet["total_assets_minor"] == 7450
+    assert balance_sheet["balanced"] is True
+
+    saved_report = test_client.post(
+        "/api/accounting/financial-reports",
+        json={
+            "name": "April management income statement",
+            "report_type": "income_statement",
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-30",
+            "notes": "Reviewed by finance",
+        },
+    )
+    assert saved_report.status_code == 201
+    saved = saved_report.json()
+    assert saved["status"] == "Generated"
+    assert saved["data"]["snapshot"]["total_expenses_minor"] == 12550
+    assert saved["data"]["notes"] == "Reviewed by finance"
+    assert test_client.get("/api/modules/financial-reports/records").json() == [saved]
+    assert test_client.post(
+        "/api/accounting/financial-reports",
+        json={
+            "name": "Invalid reporting period",
+            "report_type": "income_statement",
+            "start_date": "2026-05-01",
+            "end_date": "2026-04-30",
+        },
+    ).status_code == 422
+    assert test_client.post(
+        "/api/modules/financial-reports/records",
+        json={"name": "Unverified report", "data": {}},
+    ).status_code == 409
+
+
+def test_fixed_asset_acquisition_and_sequential_straight_line_depreciation(test_client):
+    activate_test_year(test_client)
+    create_account(test_client, "1000", "Bank", "Asset")
+    create_account(test_client, "1500", "Equipment", "Asset")
+    create_account(test_client, "1590", "Accumulated depreciation", "Asset")
+    create_account(test_client, "6100", "Depreciation expense", "Expense")
+    asset = test_client.post(
+        "/api/modules/fixed-assets/records",
+        json={
+            "name": "Office equipment",
+            "status": "Draft",
+            "data": {
+                "asset_code": "EQ-1",
+                "acquisition_date": "2026-04-15",
+                "cost": 1200,
+                "salvage_value": 0,
+                "useful_life_years": 1,
+                "asset_account_code": "1500",
+                "acquisition_offset_account_code": "1000",
+                "accumulated_depreciation_account_code": "1590",
+                "depreciation_expense_account_code": "6100",
+            },
+        },
+    ).json()
+    approve_document(test_client, "fixed-assets", asset["id"])
+    acquired = test_client.post(
+        f"/api/modules/fixed-assets/records/{asset['id']}/post-acquisition"
+    )
+    assert acquired.status_code == 200
+    assert acquired.json()["status"] == "Active"
+    depreciation = test_client.post(
+        f"/api/modules/fixed-assets/records/{asset['id']}/depreciate?period_end=2026-05-31"
+    )
+    assert depreciation.status_code == 200
+    duplicate = test_client.post(
+        f"/api/modules/fixed-assets/records/{asset['id']}/depreciate?period_end=2026-05-31"
+    )
+    assert duplicate.status_code == 409
+    next_month = test_client.post(
+        f"/api/modules/fixed-assets/records/{asset['id']}/depreciate?period_end=2026-06-30"
+    )
+    assert next_month.status_code == 200
+    schedule = test_client.get(
+        f"/api/modules/fixed-assets/records/{asset['id']}/depreciation-schedule"
+    )
+    assert schedule.status_code == 200
+    assert schedule.json()["cost_minor"] == 120000
+    assert schedule.json()["monthly_depreciation_minor"] == 10000
+    assert schedule.json()["accumulated_depreciation_minor"] == 20000
+    assert schedule.json()["net_book_value_minor"] == 100000
+    assert schedule.json()["next_period_end"] == "2026-07-31"
+    assert [period["period_end"] for period in schedule.json()["posted_periods"]] == [
+        "2026-05-31",
+        "2026-06-30",
+    ]
+    ledger = test_client.get("/api/accounting/general-ledger").json()
+    depreciation_lines = [entry for entry in ledger if entry["document_no"].startswith("DEP-EQ-1")]
+    assert sum(entry["debit_minor"] for entry in depreciation_lines) == 20000
+    assert sum(entry["credit_minor"] for entry in depreciation_lines) == 20000
+    assert test_client.patch(
+        f"/api/modules/fixed-assets/records/{asset['id']}",
+        json={"data": {"cost": 1}},
+    ).status_code == 409
+
+
+def test_dashboard_counts_and_recent_transactions_come_from_workspace_data(test_client):
+    activate_test_year(test_client)
+    create_account(test_client, "1000", "Bank", "Asset")
+    create_account(test_client, "3000", "Owner equity", "Equity")
+    posted = test_client.post(
+        "/api/modules/journal-entry/records",
+        json={
+            "name": "Posted opening balance",
+            "data": {
+                "document_no": "JE-DASH-1",
+                "posting_date": "2026-04-01",
+                "lines": [
+                    {"account_code": "1000", "debit": 100, "credit": 0},
+                    {"account_code": "3000", "debit": 0, "credit": 100},
+                ],
+            },
+        },
+    ).json()
+    draft = test_client.post(
+        "/api/modules/journal-entry/records",
+        json={
+            "name": "Draft must stay hidden",
+            "data": {
+                "document_no": "JE-DASH-DRAFT",
+                "posting_date": "2026-04-02",
+                "lines": [
+                    {"account_code": "1000", "debit": 10, "credit": 0},
+                    {"account_code": "3000", "debit": 0, "credit": 10},
+                ],
+            },
+        },
+    ).json()
+    approve_document(test_client, "journal-entry", posted["id"])
+    assert test_client.post(f"/api/modules/journal-entry/records/{posted['id']}/post").status_code == 200
+
+    dashboard = test_client.get("/api/accounting/dashboard-summary?period=This Year").json()
+
+    assert dashboard["kpis"]["accounts"] == 2
+    assert dashboard["kpis"]["years"] == 1
+    assert dashboard["kpis"]["periods"] == 12
+    assert [row["doc"] for row in dashboard["recent_transactions"]] == ["JE-DASH-1"]
+    assert dashboard["recent_transactions"][0]["amount_minor"] == 10000
+    assert draft["status"] == "Draft"
+
+
+def test_closed_fiscal_period_rejects_journal_posting(test_client):
+    year = activate_test_year(test_client)
+    periods = test_client.get("/api/fiscal-periods")
+    assert periods.status_code == 200
+    april = periods.json()[0]
+    assert april["fiscal_year_code"] == year["code"]
+    assert test_client.post(f"/api/fiscal-periods/{april['id']}/close").status_code == 200
+
+    create_account(test_client, "5000", "Office expense", "Expense")
+    create_account(test_client, "1000", "Bank", "Asset")
+    record = test_client.post(
+        "/api/modules/journal-entry/records",
+        json={
+            "name": "Closed period journal",
+            "data": {
+                "document_no": "JE-CLOSED",
+                "posting_date": "2026-04-10",
+                "lines": [
+                    {"account_code": "5000", "debit": 100, "credit": 0},
+                    {"account_code": "1000", "debit": 0, "credit": 100},
+                ],
+            },
+        },
+    ).json()
+
+    approve_document(test_client, "journal-entry", record["id"])
+    response = test_client.post(f"/api/modules/journal-entry/records/{record['id']}/post")
+    assert response.status_code == 409
+
+
+def test_create_rejects_overlapping_fiscal_years(test_client):
+    first = make_year("FY2027", "2026-04-01", "2027-03-31")
+    test_client.post("/api/fiscal-years", json=first)
+    overlapping = make_year("CAL2026", "2026-01-01", "2026-12-31", variant="JAN_DEC")
+
+    response = test_client.post("/api/fiscal-years", json=overlapping)
+
+    assert response.status_code == 409
+    assert "overlaps" in response.json()["detail"]
+
+
+def test_duplicate_company_and_code_is_rejected(test_client):
+    year = make_year("FY2027", "2026-04-01", "2027-03-31")
+    test_client.post("/api/fiscal-years", json=year)
+
+    response = test_client.post("/api/fiscal-years", json=year)
+
+    assert response.status_code == 409
+    assert "already exists" in response.json()["detail"]
+
+
+def test_only_one_fiscal_year_per_company_can_be_active(test_client):
+    first = test_client.post(
+        "/api/fiscal-years",
+        json=make_year("FY2027", "2026-04-01", "2027-03-31"),
+    ).json()
+    second = test_client.post(
+        "/api/fiscal-years",
+        json=make_year("FY2028", "2027-04-01", "2028-03-31"),
+    ).json()
+
+    assert test_client.post(f"/api/fiscal-years/{first['id']}/activate").status_code == 200
+    conflict = test_client.post(f"/api/fiscal-years/{second['id']}/activate")
+    details = test_client.get(f"/api/fiscal-years/{second['id']}")
+
+    assert conflict.status_code == 409
+    assert details.json()["status"] == "DRAFT"
+
+
+def test_invalid_calendar_is_rejected(test_client):
+    response = test_client.post(
+        "/api/fiscal-years",
+        json=make_year("FY2027", "2026-04-02", "2027-03-31"),
+    )
+
+    assert response.status_code == 422
