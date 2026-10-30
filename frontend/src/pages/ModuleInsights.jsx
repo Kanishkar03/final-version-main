@@ -169,7 +169,7 @@ export default function ModuleInsights({ moduleId, role = 'requester' }) {
         )}
         <div className="insights-heading-actions">
           {moduleId === 'financial-reports' && canSaveReport && (
-            <button className="insights-refresh" onClick={() => { setShowReportForm((open) => !open); setError(''); setNotice('') }} disabled={loading || !data}>
+            <button className={showReportForm ? 'insights-refresh' : 'form-primary-action'} onClick={() => { setShowReportForm((open) => !open); setError(''); setNotice('') }} disabled={loading || !data}>
               {showReportForm ? 'Cancel save' : 'Save report record'}
             </button>
           )}
@@ -188,7 +188,7 @@ export default function ModuleInsights({ moduleId, role = 'requester' }) {
             <b>{reportType === 'income_statement' ? 'Income statement' : 'Balance sheet'}</b>
             <span>{reportType === 'income_statement' ? `${startDate} – ${endDate}` : `As of ${endDate}`}</span>
           </div>
-          <footer><button type="button" className="insights-refresh" onClick={() => setShowReportForm(false)} disabled={saving}>Cancel</button><button type="submit" className="insights-refresh" disabled={saving || !reportName.trim()}>{saving ? 'Saving…' : 'Save report'}</button></footer>
+          <footer><button type="button" className="insights-refresh" onClick={() => setShowReportForm(false)} disabled={saving}>Cancel</button><button type="submit" className="form-submit" disabled={saving || !reportName.trim()}>{saving ? 'Saving…' : 'Save report'}</button></footer>
         </form>
       )}
       {loading ? <div className="insights-empty">Loading report…</div> : (

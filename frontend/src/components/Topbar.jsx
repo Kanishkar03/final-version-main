@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { createPortal } from 'react-dom'
 import { apiFetch } from '../api.js'
 import Icon from './Icon.jsx'
 
@@ -140,7 +141,7 @@ export default function Topbar({
           <button className="logout-btn" onClick={onLogout}>Sign out</button>
         </div>
       </div>
-      {showMembers && (
+      {showMembers && createPortal(
         <div className="workspace-modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget && !busy) setShowMembers(false) }}>
           <section className="workspace-modal" role="dialog" aria-modal="true" aria-labelledby="workspace-members-title">
             <header>
@@ -176,7 +177,8 @@ export default function Topbar({
             </div>
             <p className="workspace-modal-note">Requesters create and submit drafts. Approvers can also submit drafts and review requests; self-approval is enabled. Administrators manage access and can submit and approve.</p>
           </section>
-        </div>
+        </div>,
+        document.body,
       )}
     </header>
   )

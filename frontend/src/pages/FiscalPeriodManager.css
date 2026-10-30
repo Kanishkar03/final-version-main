@@ -14,6 +14,21 @@
 .period-create-fields { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
 .period-create-panel > footer { display: flex; justify-content: end; }
 .period-create-panel .period-action { min-height: 36px; padding: 0 12px; font-size: 11px; }
+.period-create-heading { padding: 4px; }
+.period-create-heading p { margin: 0 0 5px; color: #596bd0; font-size: 10px; font-weight: 800; letter-spacing: .12em; }
+.period-create-heading h1 { color: #14204a; font-size: 22px; }
+.period-create-heading span { display: block; margin-top: 5px; color: #6b7691; font-size: 12px; }
+.period-create-page { display: grid; min-height: min(62vh,520px); place-items: center; padding: 8px 0 24px; }
+.period-create-card { display: grid; width: min(100%,386px); gap: 14px; padding: 19px; border: 1px solid rgba(255,255,255,.9); border-radius: 18px; background: rgba(255,255,255,.8); box-shadow: 0 8px 28px rgba(76,98,180,.1); }
+.period-create-fields { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; }
+.period-create-card .period-field { min-width: 0; gap: 5px; }
+.period-create-card .period-field input,.period-create-card .period-field select { width: 100%; min-width: 0; min-height: 38px; border: 1px solid #dce2f0; border-radius: 8px; padding: 0 10px; color: #34415f; background: #fff; font-size: 11px; }
+.period-create-card .period-field input:read-only,.period-create-card .period-field select:disabled { color: #65718c; background: #f9faff; }
+.period-create-card footer { display: flex; justify-content: flex-end; gap: 8px; padding-top: 5px; border-top: 1px solid #edf0f6; }
+.period-create-empty { display: grid; gap: 8px; color: #78839a; font-size: 10px; line-height: 1.5; }
+.period-create-empty .period-action { justify-self: start; }
+.period-create-card .form-submit { min-height: 36px; border-radius: 8px; background: #397ff0; box-shadow: 0 5px 12px rgba(48,112,227,.22); }
+.period-create-card .form-submit:hover:not(:disabled) { background: #2d70de; }
 .period-modal-backdrop { position: fixed; z-index: 30; inset: 0; display: grid; place-items: center; padding: 16px; background: rgba(25,35,66,.42); }
 .period-modal { width: min(100%, 560px); max-height: min(90vh, 720px); overflow-y: auto; border-radius: 16px; background: #fff; box-shadow: 0 24px 80px rgba(17,29,68,.25); }
 .period-modal > header { display: flex; justify-content: space-between; align-items: start; padding: 18px 20px; border-bottom: 1px solid #edf0f6; }

@@ -177,7 +177,7 @@ export default function LedgerReport({ mode, search = '', role = 'requester' }) 
       <header className="ledger-heading">
         <div><p>FINANCIAL ACCOUNTING / LIVE POSTED DATA</p><h1>{isTrialBalance ? 'Trial Balance' : 'General Ledger'}</h1><span>{isTrialBalance ? 'Balances are calculated from posted transactions only.' : 'Posted source documents, account-by-account.'}</span></div>
         <div className="ledger-heading-actions">
-          {!isTrialBalance && canCreateEntry && <button className="ledger-export" onClick={() => { setShowCreateForm((open) => !open); setError(''); setNotice('') }}>{showCreateForm ? 'Cancel entry' : 'Create ledger entry'}</button>}
+          {!isTrialBalance && canCreateEntry && <button className={showCreateForm ? 'ledger-export' : 'form-primary-action'} onClick={() => { setShowCreateForm((open) => !open); setError(''); setNotice('') }}>{showCreateForm ? 'Cancel entry' : 'Create ledger entry'}</button>}
           <button className="ledger-export" onClick={exportCsv} disabled={loading || (isTrialBalance ? !filteredAccounts.length : !filteredEntries.length)}>Export CSV</button>
         </div>
       </header>
@@ -206,7 +206,7 @@ export default function LedgerReport({ mode, search = '', role = 'requester' }) 
           </div>
           <div className="manual-ledger-form-actions">
             <button type="button" className="ledger-export" onClick={() => setEntryForm((current) => ({ ...current, lines: [...current.lines, { account_code: '', debit: '', credit: '', description: '' }] }))}>Add line</button>
-            <button type="submit" className="ledger-export ledger-create-submit" disabled={saving}>{saving ? 'Posting…' : 'Post ledger entry'}</button>
+            <button type="submit" className="form-submit" disabled={saving}>{saving ? 'Posting…' : 'Post ledger entry'}</button>
           </div>
           {!accounts.some((account) => account.status === 'Active') && <p className="ledger-note">Create and activate accounts in Chart of Accounts before posting a ledger entry.</p>}
         </form>

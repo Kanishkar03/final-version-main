@@ -13,7 +13,7 @@ function getDefaultDates(variant) {
 }
 
 const INITIAL_FORM = {
-  company: 'STACKLY001',
+  company: '',
   code: '',
   name: '',
   variant: 'APR_MAR',
@@ -28,6 +28,10 @@ function errorMessage(data, fallback) {
     return data.detail.map((item) => item.msg).filter(Boolean).join(' ')
   }
   return fallback
+}
+
+function getCompanyCode(company) {
+  return company?.data?.company_code || company?.company_code || ''
 }
 
 async function apiRequest(path, options = {}) {
@@ -72,13 +76,16 @@ function Field({ label, name, value, onChange, error, hint, ...props }) {
   )
 }
 
-function FiscalYearModule({ embedded = false, role = 'requester' }) {
+function FiscalYearModule({ embedded = false, role = 'requester', startInManualPeriodMode = false, onFiscalYearCreated }) {
   const canManage = role === 'admin'
   const [years, setYears] = useState([])
   const [periods, setPeriods] = useState([])
+  const [companies, setCompanies] = useState([])
   const [selected, setSelected] = useState(null)
-  const [mode, setMode] = useState('list')
-  const [form, setForm] = useState(INITIAL_FORM)
+  const [mode, setMode] = useState(startInManualPeriodMode ? 'create' : 'list')
+  const [form, setForm] = useState(() => startInManualPeriodMode
+    ? { ...INITIAL_FORM, generate_periods: false }
+    : INITIAL_FORM)
   const [errors, setErrors] = useState({})
   const [search, setSearch] = useState('')
   const [statusFilter, setStatusFilter] = useState('ALL')
@@ -89,12 +96,20 @@ function FiscalYearModule({ embedded = false, role = 'requester' }) {
 
   async function loadYears() {
     try {
-      const [yearItems, periods] = await Promise.all([
+      const [yearItems, periodItems, companyItems] = await Promise.all([
         apiRequest('/api/fiscal-years'),
         apiRequest('/api/fiscal-periods'),
+        apiRequest('/api/modules/company/records'),
       ])
       setYears(yearItems)
-      setPeriods(periods)
+      setPeriods(periodItems)
+      setCompanies(companyItems)
+      setForm((current) => ({
+        ...current,
+        company: companyItems.some((company) => getCompanyCode(company) === current.company)
+          ? current.company
+          : getCompanyCode(companyItems[0]),
+      }))
     } catch (error) {
       setNotice(error.message)
       setNoticeType('error')
@@ -105,11 +120,22 @@ function FiscalYearModule({ embedded = false, role = 'requester' }) {
 
   useEffect(() => {
     let cancelled = false
-    Promise.all([apiRequest('/api/fiscal-years'), apiRequest('/api/fiscal-periods')])
-      .then(([yearItems, periods]) => {
+    Promise.all([
+      apiRequest('/api/fiscal-years'),
+      apiRequest('/api/fiscal-periods'),
+      apiRequest('/api/modules/company/records'),
+    ])
+      .then(([yearItems, periodItems, companyItems]) => {
         if (!cancelled) {
           setYears(yearItems)
-          setPeriods(periods)
+          setPeriods(periodItems)
+          setCompanies(companyItems)
+          setForm((current) => ({
+            ...current,
+            company: companyItems.some((company) => getCompanyCode(company) === current.company)
+              ? current.company
+              : getCompanyCode(companyItems[0]),
+          }))
         }
       })
       .catch((error) => {
@@ -143,7 +169,9 @@ function FiscalYearModule({ embedded = false, role = 'requester' }) {
 
   function startCreate() {
     if (!canManage) return
-    setForm(INITIAL_FORM)
+    setForm(startInManualPeriodMode
+      ? { ...INITIAL_FORM, company: getCompanyCode(companies[0]), generate_periods: false }
+      : { ...INITIAL_FORM, company: getCompanyCode(companies[0]) })
     setErrors({})
     setSelected(null)
     setNotice('')
@@ -172,6 +200,10 @@ function FiscalYearModule({ embedded = false, role = 'requester' }) {
         body: JSON.stringify(form),
       })
       await loadYears()
+      if (onFiscalYearCreated) {
+        onFiscalYearCreated(created)
+        return
+      }
       setSelected(created)
       setMode('detail')
       setNotice(`${created.code} was created with ${created.period_count} accounting periods.`)
@@ -308,7 +340,14 @@ function FiscalYearModule({ embedded = false, role = 'requester' }) {
             <form onSubmit={createYear}>
               <div className="fy-form-section"><span className="fy-section-number">01</span><div><h3>Identification</h3><p>Choose the company and identify this fiscal year.</p></div></div>
               <div className="fy-form-grid">
-                <Field label="Company code" name="company" value={form.company} onChange={change} error={errors.company} maxLength={30} />
+                <label className="fy-field"><span>Company code<i>*</i></span><select name="company" value={form.company} onChange={change} aria-invalid={Boolean(errors.company)} disabled={!companies.length}>
+                  {companies.length
+                    ? companies.map((company) => <option key={company.id} value={getCompanyCode(company)}>{getCompanyCode(company)} · {company.name}</option>)
+                    : <option value="">No companies available</option>}
+                </select>
+                  {errors.company && <small className="fy-error">{errors.company}</small>}
+                  {!companies.length && <small className="fy-field-hint">Create a company before setting up a fiscal year.</small>}
+                </label>
                 <Field label="Fiscal year code" name="code" value={form.code} onChange={change} error={errors.code} placeholder="e.g. FY2027" maxLength={20} />
                 <Field label="Fiscal year name" name="name" value={form.name} onChange={change} error={errors.name} placeholder="e.g. Financial Year 2027-28" maxLength={100} />
                 <label className="fy-field"><span>Fiscal year variant<i>*</i></span><select name="variant" value={form.variant} onChange={changeVariant}><option value="APR_MAR">April – March (India)</option><option value="JAN_DEC">January – December</option></select></label>
@@ -329,7 +368,7 @@ function FiscalYearModule({ embedded = false, role = 'requester' }) {
                 <span><b>Generate all 12 periods automatically</b><p>{form.generate_periods ? 'Create a complete monthly calendar now. Clear this option to add periods individually from Fiscal Periods before activation.' : 'No periods will be generated. Add all 12 contiguous periods from Fiscal Periods before activating this year.'}</p></span>
                 <span className="fy-generation-badge">{form.generate_periods ? '12 PERIODS' : 'MANUAL SETUP'}</span>
               </label>
-              <div className="fy-form-actions"><button type="button" className="fy-outline" onClick={() => setMode('list')}>Cancel</button><button className="fy-primary" type="submit" disabled={busy}>{busy ? 'Saving…' : 'Save fiscal year'}</button></div>
+              <div className="fy-form-actions"><button type="button" className="fy-outline" onClick={() => setMode('list')}>Cancel</button><button className="fy-primary" type="submit" disabled={busy || !companies.length}>{busy ? 'Saving…' : 'Save fiscal year'}</button></div>
             </form>
           </section>}
 

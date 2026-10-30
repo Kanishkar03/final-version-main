@@ -10,7 +10,7 @@ async function apiRequest(path, options = {}) {
   return data
 }
 
-export default function FiscalPeriodManager({ onNavigate, role = 'requester' }) {
+export default function FiscalPeriodManager({ onNavigate, role = 'requester', setupFiscalYearId = '', onSetupOpened }) {
   const canManage = role === 'admin'
   const [periods, setPeriods] = useState([])
   const [years, setYears] = useState([])
@@ -47,6 +47,9 @@ export default function FiscalPeriodManager({ onNavigate, role = 'requester' }) 
   const closedCount = periods.filter((period) => period.status === 'CLOSED').length
   const activeYearCount = new Set(periods.filter((period) => period.fiscal_year_status === 'ACTIVE').map((period) => period.fiscal_year_code)).size
   const currentPeriod = periods.find((period) => period.start_date <= today && period.end_date >= today)
+  const createPeriodCode = selectedCreateYear && createForm.period_number
+    ? `${selectedCreateYear.code}-P${String(createForm.period_number).padStart(2, '0')}`
+    : ''
 
   function exportPeriods() {
     const rows = [
@@ -97,30 +100,58 @@ export default function FiscalPeriodManager({ onNavigate, role = 'requester' }) 
           setToday(new Date().toISOString().slice(0, 10))
           setPeriods(periodItems)
           setYears(yearItems)
+          if (setupFiscalYearId) {
+            setCreateForm(getInitialCreateForm(yearItems, periodItems, setupFiscalYearId))
+            setCreating(true)
+            onSetupOpened?.()
+          }
         }
       })
       .catch((requestError) => { if (!cancelled) setError(requestError.message) })
       .finally(() => { if (!cancelled) setLoading(false) })
     return () => { cancelled = true }
-  }, [])
+  }, [setupFiscalYearId, onSetupOpened])
 
-  function startCreate() {
-    const firstYear = years.find((year) => year.status === 'DRAFT'
-      && periods.filter((period) => period.fiscal_year_id === year.id).length < year.period_count)
+  function getInitialCreateForm(yearItems = years, periodItems = periods, preferredYearId = '') {
+    const draftYears = yearItems.filter((year) => year.status === 'DRAFT')
+    const hasAvailablePeriod = (year) => Array.from({ length: year.period_count }, (_, index) => index + 1)
+      .some((number) => !periodItems.some((period) => period.fiscal_year_id === year.id && period.period_number === number))
+    const preferredYear = draftYears.find((year) => String(year.id) === preferredYearId && hasAvailablePeriod(year))
+    const firstYear = preferredYear || draftYears.find((year) => (
+      Array.from({ length: year.period_count }, (_, index) => index + 1)
+        .some((number) => !periodItems.some((period) => period.fiscal_year_id === year.id && period.period_number === number))
+    )) || draftYears[0]
     const nextNumber = firstYear
       ? Array.from({ length: firstYear.period_count }, (_, index) => index + 1)
-        .find((number) => !periods.some((period) => period.fiscal_year_id === firstYear.id && period.period_number === number))
+        .find((number) => !periodItems.some((period) => period.fiscal_year_id === firstYear.id && period.period_number === number))
       : ''
-    setCreateForm({
+    return {
       fiscal_year_id: firstYear ? String(firstYear.id) : '',
       period_number: nextNumber ? String(nextNumber) : '',
       name: '',
       start_date: '',
       end_date: '',
-    })
-    setCreating(true)
+    }
+  }
+
+  async function startCreate() {
+    setBusy(true)
     setError('')
     setNotice('')
+    try {
+      const [periodItems, yearItems] = await Promise.all([
+        apiRequest('/api/fiscal-periods'),
+        apiRequest('/api/fiscal-years'),
+      ])
+      setPeriods(periodItems)
+      setYears(yearItems)
+      setCreateForm(getInitialCreateForm(yearItems, periodItems))
+      setCreating(true)
+    } catch (requestError) {
+      setError(requestError.message)
+    } finally {
+      setBusy(false)
+    }
   }
 
   async function createPeriod(event) {
@@ -198,25 +229,32 @@ export default function FiscalPeriodManager({ onNavigate, role = 'requester' }) 
 
   return (
     <section className="ledger-page">
-      <header className="ledger-heading">
+      {creating && canManage && (
+        <header className="period-create-heading">
+          <div><p>FISCAL PERIOD</p><h1>Create Fiscal Period</h1><span>Configure an accounting period within a draft fiscal year.</span></div>
+        </header>
+      )}
+      {!creating && <header className="ledger-heading">
         <div><p>FINANCIAL CALENDAR / PERIOD CONTROL</p>        <h1>Fiscal Periods</h1><span>Review the posting calendar, create periods for draft years, and manage period controls.</span></div>
         <div className="period-heading-actions">
           <button className="ledger-export" onClick={exportPeriods} disabled={loading || !filteredPeriods.length}>Export CSV</button>
           <button className="ledger-export" onClick={loadPeriods} disabled={loading || busy}>Refresh</button>
           {canManage
             ? <>
-              <button className="period-action" onClick={startCreate}>Create fiscal period</button>
+              <button className={creating ? 'period-action' : 'form-primary-action'} onClick={startCreate} disabled={busy || loading}>Create fiscal period</button>
               <button className="period-action" onClick={() => onNavigate?.('fiscal-year')}>Create fiscal year</button>
             </>
             : <span className="period-admin-note">Period changes are restricted to workspace admins.</span>}
         </div>
-      </header>
+      </header>}
       {error && <div className="ledger-error" role="alert">{error}</div>}
       {notice && <div className="period-notice" role="status">{notice}</div>}
       {creating && canManage && (
-        <form className="period-create-panel" onSubmit={createPeriod}>
-          <header><div><p>MANUAL CALENDAR SETUP</p><h2>Create fiscal period</h2><span>Add one period to a draft fiscal year. Periods must stay in the year and remain contiguous.</span></div><button type="button" className="ledger-export" onClick={() => setCreating(false)} disabled={busy}>Cancel</button></header>
-          <div className="period-create-fields">
+        <div className="period-create-page">
+          <form className="period-create-card" onSubmit={createPeriod}>
+            <div className="period-create-fields">
+            <label className="period-field">Period code<input value={createPeriodCode} placeholder="Auto-generated" readOnly /></label>
+            <label className="period-field">Period name<input required maxLength="60" placeholder="e.g. April 2025" value={createForm.name} onChange={(event) => setCreateForm((current) => ({ ...current, name: event.target.value }))} /></label>
             <label className="period-field">Fiscal year<select required value={createForm.fiscal_year_id} onChange={(event) => {
               const yearId = event.target.value
               const year = years.find((item) => String(item.id) === yearId)
@@ -224,23 +262,32 @@ export default function FiscalPeriodManager({ onNavigate, role = 'requester' }) 
                 .find((number) => !periods.some((period) => period.fiscal_year_id === year.id && period.period_number === number))
               setCreateForm((current) => ({ ...current, fiscal_year_id: yearId, period_number: nextNumber ? String(nextNumber) : '' }))
             }}>
-              <option value="">Select a draft fiscal year</option>
+              <option value="">Select fiscal year</option>
               {years.filter((year) => year.status === 'DRAFT').map((year) => <option key={year.id} value={year.id}>{year.code} · {year.name}</option>)}
             </select></label>
-            <label className="period-field">Period number<select required value={createForm.period_number} onChange={(event) => setCreateForm((current) => ({ ...current, period_number: event.target.value }))}>
-              <option value="">Select available number</option>
-              {availableNumbers.map((number) => <option key={number} value={number}>{String(number).padStart(2, '0')}</option>)}
-            </select></label>
-            <label className="period-field">Period name<input required maxLength="60" value={createForm.name} onChange={(event) => setCreateForm((current) => ({ ...current, name: event.target.value }))} /></label>
+            <label className="period-field">Status<select value="OPEN" disabled><option value="OPEN">Open</option></select></label>
             <label className="period-field">Start date<input required type="date" min={selectedCreateYear?.start} max={selectedCreateYear?.end} value={createForm.start_date} onChange={(event) => setCreateForm((current) => ({ ...current, start_date: event.target.value }))} /></label>
             <label className="period-field">End date<input required type="date" min={createForm.start_date || selectedCreateYear?.start} max={selectedCreateYear?.end} value={createForm.end_date} onChange={(event) => setCreateForm((current) => ({ ...current, end_date: event.target.value }))} /></label>
-          </div>
-          {!years.some((year) => year.status === 'DRAFT' && periods.filter((period) => period.fiscal_year_id === year.id).length < year.period_count) && (
-            <p className="period-edit-note">No draft year has an available period number. To use manual periods, create a fiscal year and clear “Generate all 12 periods automatically”.</p>
+            </div>
+          {!availableNumbers.length && (
+            <div className="period-create-empty">
+              <p>{selectedCreateYear
+                ? `${selectedCreateYear.code} already has all ${selectedCreateYear.period_count} periods configured. Choose another draft year with unconfigured periods or create a new manual fiscal year.`
+                : 'No draft fiscal year is available. Create a fiscal year before adding periods.'}</p>
+              <button type="button" className="period-action" onClick={() => onNavigate?.('fiscal-year-create-manual')}>
+                {selectedCreateYear ? 'Create another fiscal year' : 'Create draft fiscal year'}
+              </button>
+            </div>
           )}
-          <footer><button type="submit" className="period-action" disabled={busy || !availableNumbers.length}>{busy ? 'Creating…' : 'Create period'}</button></footer>
-        </form>
+            <footer>
+              <button type="button" className="ledger-export" onClick={() => setCreating(false)} disabled={busy}>Cancel</button>
+              <button type="button" className="ledger-export" onClick={() => setCreateForm(getInitialCreateForm())} disabled={busy}>Reset</button>
+              <button type="submit" className="form-submit" disabled={busy || !availableNumbers.length}>{busy ? 'Creating…' : 'Create Period'}</button>
+            </footer>
+          </form>
+        </div>
       )}
+      {!creating && <>
       <section className="period-overview" aria-label="Fiscal period overview">
         <article className="period-overview-card calendar">
           <span className="period-overview-icon">▦</span>
@@ -292,6 +339,7 @@ export default function FiscalPeriodManager({ onNavigate, role = 'requester' }) 
         </section>
       )}
       <p className="ledger-note">Fiscal years can generate twelve periods automatically or use individual period setup. Activating a year requires twelve contiguous periods. Changing a period boundary shifts the adjoining open period to avoid gaps or overlaps; dates that contain posted ledger entries cannot be reassigned.</p>
+      </>}
       {editing && canManage && (
         <div className="period-modal-backdrop" role="presentation">
           <section className="period-modal" role="dialog" aria-modal="true" aria-labelledby="period-edit-title">
@@ -303,7 +351,7 @@ export default function FiscalPeriodManager({ onNavigate, role = 'requester' }) 
                 <label className="period-field">End date<input required type="date" value={form.end_date} disabled={editing.status === 'CLOSED'} onChange={(event) => setForm((current) => ({ ...current, end_date: event.target.value }))} /></label>
               </div>
               <p className="period-edit-note">Dates must stay inside the fiscal year. Moving a boundary also adjusts the neighboring open period, and is blocked if it would reassign a posted ledger entry.</p>
-              <footer><button type="button" className="ledger-export" onClick={() => setEditing(null)} disabled={busy}>Cancel</button><button type="submit" className="period-action" disabled={busy}>{busy ? 'Saving…' : 'Save changes'}</button></footer>
+              <footer><button type="button" className="ledger-export" onClick={() => setEditing(null)} disabled={busy}>Cancel</button><button type="submit" className="form-submit" disabled={busy}>{busy ? 'Saving…' : 'Save changes'}</button></footer>
             </form>
           </section>
         </div>

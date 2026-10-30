@@ -82,6 +82,11 @@
 .wb-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
 .wb-field { display: grid; gap: 6px; color: #3b4763; font-size: 11px; font-weight: 650; }
 .wb-field input, .wb-field select { width: 100%; min-height: 38px; border: 1px solid #dce2f0; border-radius: 8px; padding: 0 10px; outline: 0; color: #25304f; background: #fff; font-size: 12px; }
+.wb-account-field { display: grid; gap: 6px; }
+.wb-account-help { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 8px; color: #78839a; font-size: 10px; font-weight: 400; line-height: 1.4; }
+.wb-account-help.error { color: #a62633; }
+.wb-account-help button { padding: 0; border: 0; color: #435fd4; background: transparent; font-size: inherit; font-weight: 700; cursor: pointer; }
+.wb-account-help button:hover { text-decoration: underline; }
 .wb-field input:focus, .wb-field select:focus { border-color: #7082e8; box-shadow: 0 0 0 3px rgba(91,112,230,.14); }
 .wb-field textarea { width: 100%; resize: vertical; border: 1px solid #dce2f0; border-radius: 8px; padding: 10px; outline: 0; color: #25304f; background: #fff; font: inherit; font-size: 12px; }
 .wb-field textarea:focus { border-color: #7082e8; box-shadow: 0 0 0 3px rgba(91,112,230,.14); }

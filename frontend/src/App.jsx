@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import Sidebar from './components/Sidebar.jsx'
 import Topbar from './components/Topbar.jsx'
 import FicoModuleNav from './components/FicoModuleNav.jsx'
@@ -9,7 +9,7 @@ import LedgerReport from './pages/LedgerReport.jsx'
 import FiscalPeriodManager from './pages/FiscalPeriodManager.jsx'
 import ModuleWorkbench from './pages/ModuleWorkbench.jsx'
 import FiscalYearModule from './FiscalYearModule.jsx'
-import ModuleInsights from './pages/ModuleInsights.jsx'
+import FinancialReports from './pages/FinancialReports.jsx'
 import { ficoNav } from './data/ficoData.js'
 import './styles/shell.css'
 
@@ -26,6 +26,8 @@ function App() {
   const [workspaces, setWorkspaces] = useState([])
   const [activeWorkspaceId, setActiveWorkspaceId] = useState('')
   const [workspaceReady, setWorkspaceReady] = useState(false)
+  const [periodSetupFiscalYearId, setPeriodSetupFiscalYearId] = useState('')
+  const clearPeriodSetupFiscalYear = useCallback(() => setPeriodSetupFiscalYearId(''), [])
 
   useEffect(() => {
     let cancelled = false
@@ -112,6 +114,12 @@ function App() {
     setSearch('')
     window.scrollTo({ top: 0 })
   }
+  const returnToNewFiscalPeriod = (year) => {
+    setPeriodSetupFiscalYearId(String(year.id))
+    setPage('fiscal-period')
+    setSearch('')
+    window.scrollTo({ top: 0 })
+  }
   const activeWorkspace = workspaces.find((workspace) => String(workspace.id) === activeWorkspaceId)
 
   let content
@@ -119,14 +127,21 @@ function App() {
     content = <FicoDashboard onNavigate={navigate} search={search} />
   } else if (page === 'fiscal-year') {
     content = <FiscalYearModule embedded role={activeWorkspace?.role} />
+  } else if (page === 'fiscal-year-create-manual') {
+    content = <FiscalYearModule key="manual-period-setup" embedded role={activeWorkspace?.role} startInManualPeriodMode onFiscalYearCreated={returnToNewFiscalPeriod} />
   } else if (page === 'trial-balance') {
     content = <LedgerReport mode="trial-balance" search={search} role={activeWorkspace?.role} />
   } else if (page === 'general-ledger') {
     content = <LedgerReport mode="general-ledger" search={search} role={activeWorkspace?.role} />
   } else if (page === 'fiscal-period') {
-    content = <FiscalPeriodManager onNavigate={navigate} role={activeWorkspace?.role} />
+    content = <FiscalPeriodManager
+      onNavigate={navigate}
+      role={activeWorkspace?.role}
+      setupFiscalYearId={periodSetupFiscalYearId}
+      onSetupOpened={clearPeriodSetupFiscalYear}
+    />
   } else if (page === 'financial-reports') {
-    content = <ModuleInsights moduleId="financial-reports" role={activeWorkspace?.role} />
+    content = <FinancialReports role={activeWorkspace?.role} />
   } else if (ficoNav.some((item) => item.id === page)) {
     content = <ModuleWorkbench key={page} moduleId={page} search={search} onNavigate={navigate} role={activeWorkspace?.role} />
   } else {

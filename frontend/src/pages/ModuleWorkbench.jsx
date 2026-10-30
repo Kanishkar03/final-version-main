@@ -173,6 +173,20 @@ function initialData(moduleId, fields) {
   return data
 }
 
+function getAccountsForField(accounts, field) {
+  const allowedTypes = field.accountType.split(',')
+  return accounts.filter((account) => account.status === 'Active' && allowedTypes.includes(account.account_type))
+}
+
+function getAccountFieldMessage(accounts, field, loading, error) {
+  if (loading) return 'Loading accounts…'
+  if (error) return `Unable to load accounts: ${error}`
+  const hasMatchingAccount = accounts.some((account) => field.accountType.split(',').includes(account.account_type))
+  return hasMatchingAccount
+    ? `No active ${field.accountType} account. Activate one in Chart of Accounts.`
+    : `Create an active ${field.accountType} account in Chart of Accounts.`
+}
+
 function localDateValue() {
   const now = new Date()
   return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
@@ -217,6 +231,7 @@ export default function ModuleWorkbench({ moduleId, search = '', onNavigate, rol
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [accounts, setAccounts] = useState([])
+  const [accountRequest, setAccountRequest] = useState({ moduleId: null, loading: false, error: '' })
   const [gstRates, setGstRates] = useState([])
   const [settlements, setSettlements] = useState({})
   const [paymentRecord, setPaymentRecord] = useState(null)
@@ -241,6 +256,8 @@ export default function ModuleWorkbench({ moduleId, search = '', onNavigate, rol
   const canManage = role === 'admin'
   const invoiceModule = ['ap', 'ar'].includes(moduleId)
   const needsAccounts = postingModule || ['fixed-assets', 'budgeting'].includes(moduleId)
+  const accountsLoading = needsAccounts && (accountRequest.moduleId !== moduleId || accountRequest.loading)
+  const accountsError = accountRequest.moduleId === moduleId ? accountRequest.error : ''
   const activeAccountTypes = new Set(accounts.filter((account) => account.status === 'Active').map((account) => account.account_type))
   const hasActiveAccounts = accounts.some((account) => account.status === 'Active')
   const expectedAccountTypes = moduleId === 'ap'
@@ -264,8 +281,14 @@ export default function ModuleWorkbench({ moduleId, search = '', onNavigate, rol
       .finally(() => { if (!cancelled) setLoading(false) })
     if (needsAccounts) {
       apiRequest('/api/accounting/accounts')
-        .then((items) => { if (!cancelled) setAccounts(items) })
-        .catch((requestError) => { if (!cancelled) setError(requestError.message) })
+        .then((items) => {
+          if (cancelled) return
+          setAccounts(items)
+          setAccountRequest({ moduleId, loading: false, error: '' })
+        })
+        .catch((requestError) => {
+          if (!cancelled) setAccountRequest({ moduleId, loading: false, error: requestError.message })
+        })
     }
     if (invoiceModule) {
       apiRequest('/api/modules/gst/records')
@@ -834,12 +857,20 @@ export default function ModuleWorkbench({ moduleId, search = '', onNavigate, rol
                         <option value="">Select…</option>{field.options.map((option) => <option key={option}>{option}</option>)}
                       </select>
                     ) : field.type === 'account' ? (
-                      <select required={field.required} value={form.data[field.key] || ''} onChange={(event) => setForm((current) => ({ ...current, data: { ...current.data, [field.key]: event.target.value } }))}>
-                        <option value="">Select active account…</option>
-                        {accounts.filter((account) => account.status === 'Active' && field.accountType.split(',').includes(account.account_type)).map((account) => (
-                          <option key={account.account_code} value={account.account_code}>{account.account_code} · {account.account_name}</option>
-                        ))}
-                      </select>
+                      <div className="wb-account-field">
+                        <select required={field.required} value={form.data[field.key] || ''} onChange={(event) => setForm((current) => ({ ...current, data: { ...current.data, [field.key]: event.target.value } }))}>
+                          <option value="">Select active account…</option>
+                          {getAccountsForField(accounts, field).map((account) => (
+                            <option key={account.account_code} value={account.account_code}>{account.account_code} · {account.account_name}</option>
+                          ))}
+                        </select>
+                        {(!getAccountsForField(accounts, field).length || accountsLoading || accountsError) && (
+                          <span className={accountsError ? 'wb-account-help error' : 'wb-account-help'} role={accountsError ? 'alert' : 'status'}>
+                            {getAccountFieldMessage(accounts, field, accountsLoading, accountsError)}
+                            {!accountsLoading && !accountsError && canManage && <button type="button" onClick={() => onNavigate?.('chart-of-accounts')}>Open Chart of Accounts</button>}
+                          </span>
+                        )}
+                      </div>
                     ) : (
                       <input
                         type={field.type || 'text'}
@@ -866,7 +897,7 @@ export default function ModuleWorkbench({ moduleId, search = '', onNavigate, rol
                 </section>
               )}
               {error && <div className="wb-error" role="alert">{error}</div>}
-              <footer><button type="button" className="wb-cancel" onClick={() => setShowForm(false)}>Cancel</button><button className="wb-primary" disabled={busy}>{busy ? 'Saving…' : approvalModule ? 'Save draft' : 'Save record'}</button></footer>
+              <footer><button type="button" className="wb-cancel" onClick={() => setShowForm(false)}>Cancel</button><button className="wb-primary" disabled={busy || (needsAccounts && (accountsLoading || Boolean(accountsError)))}>{busy ? 'Saving…' : approvalModule ? 'Save draft' : 'Save record'}</button></footer>
             </form>
           </section>
         </div>
